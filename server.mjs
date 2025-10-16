@@ -59,8 +59,8 @@ const gql = String.raw;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const CUSTOMERS_QUERY = gql`
-  query Customers($first: Int!, $after: String) {
-    customers(first: $first, after: $after, sortKey: ID) {
+  query Customers($first: Int!, $after: String, $query: String) {
+    customers(first: $first, after: $after, sortKey: ID, query: $query) {
       edges {
         cursor
         node {
@@ -104,7 +104,7 @@ function reasonsForSuspect(c) {
   return reasons;
 }
 
-/* --- GET /api/customers/scan --- 
+/* --- GET /api/customers/scan ---
    Быстрый скан: по умолчанию проверяем до 50 клиентов батчами по 25.
    Можно переопределить: /api/customers/scan?max=200&batch=100
 */
@@ -147,12 +147,62 @@ app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (re
 
       checked += edges.length;
       if (!customers?.pageInfo?.hasNextPage) break;
-      await sleep(150); // легкая пауза, чтобы не упираться в троттлинг
+      await sleep(150);
     }
 
     res.json({ totalChecked: checked, suspects });
   } catch (e) {
     console.error('SCAN ERROR:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+/* --- НОВОЕ: GET /api/customers/list ---
+   Возвращает просто список клиентов (без фильтров) для проверки полей.
+   Параметры: ?limit=50 (по умолчанию 50, максимум 500; при необходимости пагинирует).
+*/
+app.get('/api/customers/list', shopify.validateAuthenticatedSession(), async (req, res) => {
+  const session = res.locals.shopify.session;
+  const client = new shopify.api.clients.Graphql({ session });
+
+  const limit = Math.min(Number(req.query.limit ?? 50), 500);
+  const batch = Math.min(100, limit); // размер страницы
+  let after = undefined;
+  let collected = 0;
+
+  const items = [];
+
+  try {
+    while (collected < limit) {
+      const first = Math.min(batch, limit - collected);
+      const resp = await client.request(CUSTOMERS_QUERY, {
+        variables: { first, after }
+      });
+
+      const data = resp?.data ?? resp;
+      const customers = data?.customers;
+      const edges = customers?.edges || [];
+      if (!edges.length) break;
+
+      for (const { cursor, node } of edges) {
+        items.push({
+          id: node.id,
+          displayName: node.displayName,
+          email: node.email,
+          firstName: node.firstName,
+          lastName: node.lastName,
+          addresses: (node.addresses || []).map(a => ({ city: a.city, country: a.country }))
+        });
+        after = cursor;
+      }
+      collected += edges.length;
+      if (!customers?.pageInfo?.hasNextPage) break;
+      await sleep(120);
+    }
+
+    res.json({ count: items.length, customers: items });
+  } catch (e) {
+    console.error('LIST ERROR:', e);
     res.status(500).json({ error: String(e) });
   }
 });
@@ -205,14 +255,32 @@ app.get('/', (_req, res) => {
       <h2>✅ Customer Shield</h2>
       <p class="muted">API key: <code>${apiKey}</code></p>
 
-      <div style="display:flex; gap:8px; margin:12px 0">
+      <div style="display:flex; gap:8px; margin:12px 0; flex-wrap:wrap">
+        <button id="listBtn" class="btn">Показать клиентов</button>
         <button id="scanBtn" class="btn primary">Сканировать клиентов</button>
         <button id="tagBtn" class="btn" disabled>Поставить тег <code>suspect_bot</code></button>
       </div>
 
       <div id="stats" class="muted"></div>
 
-      <table id="tbl" style="margin-top:10px; display:none">
+      <!-- Таблица: список клиентов -->
+      <h3 style="margin:12px 0 4px">Список клиентов</h3>
+      <table id="listTbl" style="margin-top:6px; display:none">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Customer</th>
+            <th>Email</th>
+            <th>City</th>
+            <th>Country</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <!-- Таблица: подозрительные -->
+      <h3 style="margin:16px 0 4px">Подозрительные</h3>
+      <table id="susTbl" style="margin-top:6px; display:none">
         <thead>
           <tr>
             <th><input type="checkbox" id="checkAll" /></th>
@@ -230,16 +298,31 @@ app.get('/', (_req, res) => {
     </div>
   </div>
 
-  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
   <script>
+    const listBtn = document.getElementById('listBtn');
     const scanBtn = document.getElementById('scanBtn');
     const tagBtn  = document.getElementById('tagBtn');
     const stats   = document.getElementById('stats');
-    const tbl     = document.getElementById('tbl');
-    const tbody   = tbl.querySelector('tbody');
+
+    const listTbl = document.getElementById('listTbl');
+    const listTbody = listTbl.querySelector('tbody');
+
+    const susTbl  = document.getElementById('susTbl');
+    const susTbody= susTbl.querySelector('tbody');
     const checkAll= document.getElementById('checkAll');
 
-    function rowHtml(c){
+    function customerRow(i, c){
+      const addr = (c.addresses && c.addresses[0]) || {};
+      return \`<tr>
+        <td>\${i+1}</td>
+        <td>\${c.displayName || ''}</td>
+        <td>\${c.email || ''}</td>
+        <td>\${addr.city || ''}</td>
+        <td>\${addr.country || ''}</td>
+      </tr>\`;
+    }
+
+    function suspectRow(c){
       return \`<tr>
         <td><input type="checkbox" data-id="\${c.id}"></td>
         <td>\${c.displayName || ''}</td>
@@ -248,28 +331,41 @@ app.get('/', (_req, res) => {
       </tr>\`;
     }
 
+    listBtn.onclick = async () => {
+      listBtn.disabled = true;
+      stats.textContent = 'Загружаю клиентов…';
+      listTbody.innerHTML = '';
+      try{
+        const r = await fetch('/api/customers/list?limit=50');
+        const data = await r.json();
+        const arr = data.customers || [];
+        listTbl.style.display = arr.length ? '' : 'none';
+        listTbody.innerHTML = arr.map((c,i) => customerRow(i,c)).join('');
+        stats.textContent = 'Клиентов: ' + (data.count ?? arr.length);
+      } catch(e){
+        stats.textContent = 'Ошибка: ' + e;
+      } finally {
+        listBtn.disabled = false;
+      }
+    };
+
     scanBtn.onclick = async () => {
       scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…';
-      tbody.innerHTML = '';
+      susTbody.innerHTML = '';
       try{
-        // быстрые значения по умолчанию (под тестовый магазин)
         const r = await fetch('/api/customers/scan?max=50&batch=25');
         const data = await r.json();
         const suspects = data.suspects || [];
+        susTbl.style.display = suspects.length ? '' : 'none';
+        susTbody.innerHTML = suspects.map(suspectRow).join('');
         stats.textContent = \`Проверено: \${data.totalChecked}. Найдено подозрительных: \${suspects.length}.\`;
-        if (suspects.length){
-          tbl.style.display = '';
-          tbody.innerHTML = suspects.map(rowHtml).join('');
-          tagBtn.disabled = false;
-        } else {
-          tbl.style.display = 'none';
-        }
+        tagBtn.disabled = suspects.length === 0;
       } catch(e){ stats.textContent = 'Ошибка: ' + e; }
       finally { scanBtn.disabled = false; }
     };
 
     tagBtn.onclick = async () => {
-      const ids = Array.from(tbody.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.dataset.id);
+      const ids = Array.from(susTbody.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.dataset.id);
       if (!ids.length) { alert('Отметь хотя бы одного клиента'); return; }
       tagBtn.disabled = true;
       try{
@@ -280,10 +376,10 @@ app.get('/', (_req, res) => {
       finally { tagBtn.disabled = false; }
     };
 
-    checkAll.onchange = () => {
+    checkAll?.addEventListener('change', () => {
       const on = checkAll.checked;
-      document.querySelectorAll('tbody input[type="checkbox"]').forEach(cb => cb.checked = on);
-    };
+      susTbody.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = on);
+    });
   </script>
 </body>
 </html>`);
