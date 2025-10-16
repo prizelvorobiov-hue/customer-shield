@@ -1,6 +1,7 @@
 import express from 'express';
 import 'dotenv/config';
-import { shopifyApp, LATEST_API_VERSION } from '@shopify/shopify-app-express';
+import appExpress from '@shopify/shopify-app-express'; // CJS → default import
+const { shopifyApp, LATEST_API_VERSION } = appExpress;
 import { MemorySessionStorage } from '@shopify/shopify-app-session-storage-memory';
 
 const required = ['SHOPIFY_API_KEY','SHOPIFY_API_SECRET','SCOPES','HOST','SESSION_SECRET'];
