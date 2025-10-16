@@ -36,22 +36,8 @@ const shopify = shopifyApp({
 
 const app = express();
 app.use(shopify.cspHeaders());
-app.use((req, res, next) => {
-  const csp = [
-    "frame-ancestors https://admin.shopify.com https://*.myshopify.com",
-    "script-src 'self' 'unsafe-inline' https://cdn.shopify.com",
-    "style-src 'self' 'unsafe-inline' https://cdn.shopify.com",
-    "img-src 'self' data: https:",
-    "connect-src 'self' https://cdn.shopify.com https://admin.shopify.com https://*.myshopify.com https://*.shopifycloud.com https://*.shopifycs.com",
-    "font-src 'self' https://cdn.shopify.com data:",
-    "frame-src https://admin.shopify.com https://*.myshopify.com",
-    "object-src 'none'"
-  ].join('; ');
-  res.setHeader('Content-Security-Policy', csp);
-  next();
-});
-
 app.use(express.json());
+app.use(express.static('public'));
 
 /* ===== Auth ===== */
 app.use('/api/auth', shopify.auth.begin());
@@ -251,7 +237,6 @@ app.get('/', (_req, res) => {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Customer Shield</title>
-  <link rel="stylesheet" href="https://unpkg.com/@shopify/polaris@12.13.0/build/esm/styles.css" />
   <style>
     body{font-family:ui-sans-serif,system-ui;background:#f6f6f7}
     .wrap{max-width:980px;margin:24px auto;padding:16px}
@@ -265,7 +250,7 @@ app.get('/', (_req, res) => {
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="wrap" id="appRoot" data-api-key="${apiKey}">
     <div class="card">
       <h2>✅ Customer Shield</h2>
       <p class="muted">API key: <code>${apiKey}</code></p>
@@ -311,150 +296,15 @@ app.get('/', (_req, res) => {
     </div>
   </div>
 
-  <!-- Только cdn.shopify.com — чтобы не упереться в CSP -->
+  <!-- Только cdn.shopify.com — совместимо с CSP админки -->
   <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
   <script src="https://cdn.shopify.com/shopifycloud/app-bridge-utils.js"></script>
-  <script>
-  (function () {
-    var params = new URLSearchParams(window.location.search);
-    var host = params.get('host');
-    var shop = params.get('shop');
-
-    function initWhenReady(tries) {
-      tries = tries || 0;
-      var AB  = window['app-bridge'];
-      var ABU = window['app-bridge-utils'];
-      if (!AB || !ABU) {
-        if (tries < 50) return setTimeout(function(){ initWhenReady(tries + 1); }, 100);
-        var stats = document.getElementById('stats');
-        if (stats) stats.textContent = 'Не удалось загрузить Shopify App Bridge. Обновите страницу.';
-        return;
-      }
-
-      var app = AB.createApp({ apiKey: '${apiKey}', host: host });
-
-      function authedFetch(url, options) {
-        options = options || {};
-        return ABU.getSessionToken(app).then(function(token){
-          var headers = options.headers || {};
-          headers.Authorization = 'Bearer ' + token;
-          options.headers = headers;
-          return fetch(url, options);
-        });
-      }
-
-      // ---------- UI ----------
-      var listBtn  = document.getElementById('listBtn');
-      var scanBtn  = document.getElementById('scanBtn');
-      var tagBtn   = document.getElementById('tagBtn');
-      var statsEl  = document.getElementById('stats');
-
-      var listTbl  = document.getElementById('listTbl');
-      var listBody = listTbl.querySelector('tbody');
-
-      var susTbl   = document.getElementById('susTbl');
-      var susBody  = susTbl.querySelector('tbody');
-      var checkAll = document.getElementById('checkAll');
-
-      function customerRow(i, c){
-        var addr = (c.addresses && c.addresses[0]) || {};
-        return '<tr>'
-          + '<td>' + (i+1) + '</td>'
-          + '<td>' + (c.displayName || '') + '</td>'
-          + '<td>' + (c.email || '') + '</td>'
-          + '<td>' + (addr.city || '') + '</td>'
-          + '<td>' + (addr.country || '') + '</td>'
-          + '</tr>';
-      }
-
-      function suspectRow(c){
-        return '<tr>'
-          + '<td><input type="checkbox" data-id="' + c.id + '"></td>'
-          + '<td>' + (c.displayName || '') + '</td>'
-          + '<td>' + (c.email || '') + '</td>'
-          + '<td>' + c.reasons.join(', ') + '</td>'
-          + '</tr>';
-      }
-
-      listBtn.onclick = function () {
-        listBtn.disabled = true;
-        statsEl.textContent = 'Загружаю клиентов…';
-        listBody.innerHTML = '';
-        authedFetch('/api/customers/list?limit=50')
-          .then(function(r){
-            if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return Promise.reject('401'); }
-            return r.json();
-          })
-          .then(function(data){
-            var arr = data.customers || [];
-            listTbl.style.display = arr.length ? '' : 'none';
-            listBody.innerHTML = arr.map(function(c,i){ return customerRow(i,c); }).join('');
-            statsEl.textContent = 'Клиентов: ' + (data.count != null ? data.count : arr.length);
-          })
-          .catch(function(e){
-            if (e !== '401') statsEl.textContent = 'Ошибка: ' + e;
-          })
-          .finally(function(){ listBtn.disabled = false; });
-      };
-
-      scanBtn.onclick = function () {
-        scanBtn.disabled = true; tagBtn.disabled = true; statsEl.textContent = 'Сканирую…';
-        susBody.innerHTML = '';
-        authedFetch('/api/customers/scan?max=50&batch=25')
-          .then(function(r){
-            if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return Promise.reject('401'); }
-            return r.json();
-          })
-          .then(function(data){
-            var suspects = data.suspects || [];
-            susTbl.style.display = suspects.length ? '' : 'none';
-            susBody.innerHTML = suspects.map(function(c){ return suspectRow(c); }).join('');
-            statsEl.textContent = 'Проверено: ' + data.totalChecked + '. Найдено подозрительных: ' + suspects.length + '.';
-            tagBtn.disabled = suspects.length === 0;
-          })
-          .catch(function(e){
-            if (e !== '401') statsEl.textContent = 'Ошибка: ' + e;
-          })
-          .finally(function(){ scanBtn.disabled = false; });
-      };
-
-      tagBtn.onclick = function () {
-        var ids = Array.prototype.slice.call(susBody.querySelectorAll('input[type="checkbox"]:checked')).map(function(i){ return i.dataset.id; });
-        if (!ids.length) { alert('Отметь хотя бы одного клиента'); return; }
-        tagBtn.disabled = true;
-        authedFetch('/api/customers/tag', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: ids, tag: 'suspect_bot' })
-        })
-        .then(function(r){
-          if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return Promise.reject('401'); }
-          return r.json();
-        })
-        .then(function(data){
-          var errs = (data.results || []).filter(function(x){ return (x.errors||[]).length; }).length;
-          alert('Готово. Ошибок: ' + errs);
-        })
-        .catch(function(e){
-          if (e !== '401') alert('Ошибка: ' + e);
-        })
-        .finally(function(){ tagBtn.disabled = false; });
-      };
-
-      if (checkAll) {
-        checkAll.addEventListener('change', function(){
-          var on = checkAll.checked;
-          Array.prototype.forEach.call(susBody.querySelectorAll('input[type="checkbox"]'), function(cb){ cb.checked = on; });
-        });
-      }
-    }
-
-    document.addEventListener('DOMContentLoaded', function(){ initWhenReady(); });
-  })();
-  </script>
+  <!-- наш внешний JS -->
+  <script src="/app.js"></script>
 </body>
 </html>`);
 });
+
 
 /* ===== Start ===== */
 app.listen(PORT, () => {
