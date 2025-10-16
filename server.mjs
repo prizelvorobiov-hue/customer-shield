@@ -1,14 +1,14 @@
 import express from 'express';
 import 'dotenv/config';
 
-// В твоём окружении @shopify/shopify-app-express идёт как CJS -> берём default
+// Пакет идёт как CommonJS → берём default и деструктурируем
 import appExpress from '@shopify/shopify-app-express';
 const { shopifyApp, LATEST_API_VERSION } = appExpress;
 
 import { MemorySessionStorage } from '@shopify/shopify-app-session-storage-memory';
 
-/* ===== sanity-check env ===== */
-const required = ['SHOPIFY_API_KEY','SHOPIFY_API_SECRET','SCOPES','HOST','SESSION_SECRET'];
+/* ---------- sanity-check переменных окружения ---------- */
+const required = ['SHOPIFY_API_KEY', 'SHOPIFY_API_SECRET', 'SCOPES', 'HOST', 'SESSION_SECRET'];
 for (const k of required) {
   if (!process.env[k] || process.env[k].includes('replace_with')) {
     console.warn(`[WARN] Missing or placeholder env var: ${k}`);
@@ -17,12 +17,15 @@ for (const k of required) {
 
 const PORT = process.env.PORT || 3000;
 
-/* ===== Shopify bootstrap ===== */
+/* ---------- Инициализация Shopify ---------- */
 const shopify = shopifyApp({
   api: {
     apiKey: process.env.SHOPIFY_API_KEY,
     apiSecretKey: process.env.SHOPIFY_API_SECRET,
-    scopes: (process.env.SCOPES || '').split(',').map(s => s.trim()).filter(Boolean),
+    scopes: (process.env.SCOPES || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     hostName: (process.env.HOST || '').replace(/^https?:\/\//, ''),
     apiVersion: LATEST_API_VERSION,
     isEmbeddedApp: true,
@@ -35,29 +38,35 @@ const shopify = shopifyApp({
 });
 
 const app = express();
-app.use(shopify.cspHeaders());
+
+/* ВАЖНО: порядок middleware */
+app.use(shopify.cspHeaders());        // CSP от Shopify
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static('public'));    // отдаём /app.js
 
-/* ===== Auth ===== */
+/* ---------- Auth ---------- */
 app.use('/api/auth', shopify.auth.begin());
-app.use('/api/auth/callback', shopify.auth.callback(), shopify.redirectToShopifyOrAppRoot());
+app.use(
+  '/api/auth/callback',
+  shopify.auth.callback(),
+  shopify.redirectToShopifyOrAppRoot(),
+);
 
-/* ===== Health & GDPR ===== */
+/* ---------- Health & GDPR ---------- */
 app.get('/api/health', (_req, res) => res.status(200).json({ ok: true }));
 app.post('/api/gdpr/customers/data_request', (_req, res) => res.sendStatus(200));
 app.post('/api/gdpr/customers/redact', (_req, res) => res.sendStatus(200));
 app.post('/api/gdpr/shop/redact', (_req, res) => res.sendStatus(200));
 
-/* ===== Protected example ===== */
+/* ---------- Проба защищённого эндпойнта ---------- */
 app.get('/api/me', shopify.validateAuthenticatedSession(), async (_req, res) => {
   const session = res.locals.shopify.session;
   res.json({ shop: session.shop, isOnline: session.isOnline });
 });
 
-/* ===== Анти-бот логика ===== */
+/* ---------- Логика клиентов (скан/лист/теги) ---------- */
 const gql = String.raw;
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const CUSTOMERS_QUERY = gql`
   query Customers($first: Int!, $after: String, $query: String) {
@@ -87,7 +96,6 @@ const TAGS_ADD_MUTATION = gql`
   }
 `;
 
-// Простые правила подозрительности
 function reasonsForSuspect(c) {
   const reasons = [];
   const fn = (c.firstName || '').trim();
@@ -105,25 +113,63 @@ function reasonsForSuspect(c) {
   return reasons;
 }
 
-/* --- GET /api/customers/scan ---
-   Быстрый скан: по умолчанию проверяем до 50 клиентов батчами по 25.
-   Можно переопределить: /api/customers/scan?max=200&batch=100
-*/
+/* ----- Список клиентов ----- */
+app.get('/api/customers/list', shopify.validateAuthenticatedSession(), async (req, res) => {
+  const session = res.locals.shopify.session;
+  const client = new shopify.api.clients.Graphql({ session });
+
+  const limit = Math.min(Number(req.query.limit ?? 50), 500);
+  const batch = Math.min(100, limit);
+  let after;
+  let collected = 0;
+  const items = [];
+
+  try {
+    while (collected < limit) {
+      const first = Math.min(batch, limit - collected);
+      const resp = await client.request(CUSTOMERS_QUERY, { variables: { first, after } });
+      const data = resp?.data ?? resp;
+      const customers = data?.customers;
+      const edges = customers?.edges || [];
+      if (!edges.length) break;
+
+      for (const { cursor, node } of edges) {
+        items.push({
+          id: node.id,
+          displayName: node.displayName,
+          email: node.email,
+          firstName: node.firstName,
+          lastName: node.lastName,
+          addresses: (node.addresses || []).map((a) => ({ city: a.city, country: a.country })),
+        });
+        after = cursor;
+      }
+      collected += edges.length;
+      if (!customers?.pageInfo?.hasNextPage) break;
+      await sleep(100);
+    }
+    res.json({ count: items.length, customers: items });
+  } catch (e) {
+    console.error('LIST ERROR:', e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+/* ----- Скан клиентов ----- */
 app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (req, res) => {
   const session = res.locals.shopify.session;
   const client = new shopify.api.clients.Graphql({ session });
 
   const batch = Number(req.query.batch ?? 25);
-  const max   = Math.min(Number(req.query.max ?? 50), 2000);
-
-  let after = undefined;
+  const max = Math.min(Number(req.query.max ?? 50), 2000);
+  let after;
   let checked = 0;
   const suspects = [];
 
   try {
     while (checked < max) {
       const resp = await client.request(CUSTOMERS_QUERY, {
-        variables: { first: Math.min(batch, max - checked), after }
+        variables: { first: Math.min(batch, max - checked), after },
       });
 
       const data = resp?.data ?? resp;
@@ -140,7 +186,7 @@ app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (re
             email: node.email,
             firstName: node.firstName,
             lastName: node.lastName,
-            reasons
+            reasons,
           });
         }
         after = cursor;
@@ -148,7 +194,7 @@ app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (re
 
       checked += edges.length;
       if (!customers?.pageInfo?.hasNextPage) break;
-      await sleep(150);
+      await sleep(120);
     }
 
     res.json({ totalChecked: checked, suspects });
@@ -158,59 +204,7 @@ app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (re
   }
 });
 
-/* --- НОВОЕ: GET /api/customers/list ---
-   Возвращает просто список клиентов (без фильтров) для проверки полей.
-   Параметры: ?limit=50 (по умолчанию 50, максимум 500; при необходимости пагинирует).
-*/
-app.get('/api/customers/list', shopify.validateAuthenticatedSession(), async (req, res) => {
-  const session = res.locals.shopify.session;
-  const client = new shopify.api.clients.Graphql({ session });
-
-  const limit = Math.min(Number(req.query.limit ?? 50), 500);
-  const batch = Math.min(100, limit); // размер страницы
-  let after = undefined;
-  let collected = 0;
-
-  const items = [];
-
-  try {
-    while (collected < limit) {
-      const first = Math.min(batch, limit - collected);
-      const resp = await client.request(CUSTOMERS_QUERY, {
-        variables: { first, after }
-      });
-
-      const data = resp?.data ?? resp;
-      const customers = data?.customers;
-      const edges = customers?.edges || [];
-      if (!edges.length) break;
-
-      for (const { cursor, node } of edges) {
-        items.push({
-          id: node.id,
-          displayName: node.displayName,
-          email: node.email,
-          firstName: node.firstName,
-          lastName: node.lastName,
-          addresses: (node.addresses || []).map(a => ({ city: a.city, country: a.country }))
-        });
-        after = cursor;
-      }
-      collected += edges.length;
-      if (!customers?.pageInfo?.hasNextPage) break;
-      await sleep(120);
-    }
-
-    res.json({ count: items.length, customers: items });
-  } catch (e) {
-    console.error('LIST ERROR:', e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-/* --- POST /api/customers/tag ---
-   Тело: { ids: [<gid://shopify/Customer/...>], tag: "suspect_bot" }
-*/
+/* ----- Проставление тега ----- */
 app.post('/api/customers/tag', shopify.validateAuthenticatedSession(), async (req, res) => {
   const { ids = [], tag = 'suspect_bot' } = req.body || {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required' });
@@ -228,7 +222,7 @@ app.post('/api/customers/tag', shopify.validateAuthenticatedSession(), async (re
   res.json({ ok: true, results });
 });
 
-/* ===== Встроенная страница (UI) ===== */
+/* ---------- Встроенная страница (UI) ---------- */
 app.get('/', (_req, res) => {
   const apiKey = process.env.SHOPIFY_API_KEY || '';
   res.type('html').send(`<!DOCTYPE html>
@@ -237,6 +231,9 @@ app.get('/', (_req, res) => {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Customer Shield</title>
+  <!-- Новый App Bridge: достаточно meta + один скрипт -->
+  <meta name="shopify-api-key" content="${apiKey}" />
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
   <style>
     body{font-family:ui-sans-serif,system-ui;background:#f6f6f7}
     .wrap{max-width:980px;margin:24px auto;padding:16px}
@@ -296,17 +293,13 @@ app.get('/', (_req, res) => {
     </div>
   </div>
 
-  <!-- Только cdn.shopify.com — совместимо с CSP админки -->
-  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
-  <script src="https://cdn.shopify.com/shopifycloud/app-bridge-utils.js"></script>
-  <!-- наш внешний JS -->
+  <!-- наш код, без inline-скриптов (CSP-дружественно) -->
   <script src="/app.js"></script>
 </body>
 </html>`);
 });
 
-
-/* ===== Start ===== */
+/* ---------- Start ---------- */
 app.listen(PORT, () => {
   console.log(`Customer Shield listening on port ${PORT}`);
 });
