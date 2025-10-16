@@ -1,1 +1,1 @@
-node -v
+node 20
