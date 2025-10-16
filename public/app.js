@@ -1,26 +1,22 @@
 // public/app.js
 (function () {
   function qs(id){ return document.getElementById(id); }
-  function getShop(){ return new URLSearchParams(location.search).get('shop'); }
 
-  // Ждём инициализации App Bridge (новая версия встраивает auth в fetch)
-  function ready(tries){
+  // ждём, пока App Bridge «встанет» (глобал window.shopify появляется, когда подключён app-bridge.js и есть <meta name="shopify-api-key">)
+  function waitAB(tries){
     tries = tries || 0;
     if (!window.shopify) {
-      if (tries < 50) return setTimeout(function(){ ready(tries+1); }, 100);
-      var s = qs('stats'); if (s) s.textContent = 'Не удалось инициализировать App Bridge.';
-      // даже без shopify попробуем работать: если прилетит 401 — отправим на /api/auth
+      if (tries < 50) return setTimeout(function(){ waitAB(tries+1); }, 100);
+      // даже если не дождались — всё равно продолжим, просто перехват 401 может не сработать красиво
     }
     init();
   }
 
-  function ensureAuth(r){
-    if (r.status === 401) {
-      var s = getShop();
-      location.href = '/api/auth' + (s ? ('?shop=' + encodeURIComponent(s)) : '');
-      throw '401';
-    }
-    return r;
+  function asJson(res){
+    // если сервер вернул 401, НЕ делаем никаких редиректов вручную.
+    // app-bridge сам выполнит top-level reauth (если загружен).
+    if (res.status === 204) return {}; // на всякий случай
+    return res.json();
   }
 
   function init(){
@@ -38,31 +34,39 @@
     }
 
     if (listBtn) listBtn.onclick = function(){
-      listBtn.disabled = true; stats.textContent = 'Загружаю клиентов…'; listBody.innerHTML='';
+      listBtn.disabled = true;
+      stats.textContent = 'Загружаю клиентов…';
+      listBody.innerHTML = '';
       fetch('/api/customers/list?limit=50')
-        .then(ensureAuth).then(function(r){ return r.json(); })
+        .then(asJson)
         .then(function(d){
+          if (!d || !d.customers) return; // во время reauth JSON может не прийти, это нормально
           var arr=d.customers||[];
           listTbl.style.display=arr.length?'':'none';
           listBody.innerHTML=arr.map(function(c,i){ return customerRow(i,c); }).join('');
           stats.textContent='Клиентов: '+(d.count!=null?d.count:arr.length);
         })
-        .catch(function(e){ if(e!=='401') stats.textContent='Ошибка: '+e; })
+        .catch(function(e){
+          // во время reauth может быть «Unexpected end of input» — игнорируем, после возврата всё заработает
+          console.warn('list error:', e);
+        })
         .finally(function(){ listBtn.disabled=false; });
     };
 
     if (scanBtn) scanBtn.onclick = function(){
-      scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…'; susBody.innerHTML='';
+      scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…';
+      susBody.innerHTML = '';
       fetch('/api/customers/scan?max=50&batch=25')
-        .then(ensureAuth).then(function(r){ return r.json(); })
+        .then(asJson)
         .then(function(d){
+          if (!d || !d.suspects) return;
           var arr=d.suspects||[];
           susTbl.style.display=arr.length?'':'none';
           susBody.innerHTML=arr.map(suspectRow).join('');
           stats.textContent='Проверено: '+d.totalChecked+'. Найдено: '+arr.length+'.';
           tagBtn.disabled=!arr.length;
         })
-        .catch(function(e){ if(e!=='401') stats.textContent='Ошибка: '+e; })
+        .catch(function(e){ console.warn('scan error:', e); })
         .finally(function(){ scanBtn.disabled=false; });
     };
 
@@ -75,12 +79,13 @@
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ ids: ids, tag: 'suspect_bot' })
       })
-      .then(ensureAuth).then(function(r){ return r.json(); })
+      .then(asJson)
       .then(function(d){
+        if (!d || !d.results) return;
         var errs=(d.results||[]).filter(function(x){ return (x.errors||[]).length; }).length;
         alert('Готово. Ошибок: '+errs);
       })
-      .catch(function(e){ if(e!=='401') alert('Ошибка: '+e); })
+      .catch(function(e){ console.warn('tag error:', e); })
       .finally(function(){ tagBtn.disabled=false; });
     };
 
@@ -90,5 +95,5 @@
     });
   }
 
-  document.addEventListener('DOMContentLoaded', function(){ ready(); });
+  document.addEventListener('DOMContentLoaded', function(){ waitAB(); });
 })();
