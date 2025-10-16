@@ -297,26 +297,34 @@ app.get('/', (_req, res) => {
   </div>
 
   <!-- App Bridge + Utils для session token -->
-  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
-  <script src="https://unpkg.com/@shopify/app-bridge-utils"></script>
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const host = params.get('host');
-    const shop = params.get('shop'); // может быть null — не критично
+<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+<script src="https://cdn.shopify.com/shopifycloud/app-bridge-utils.js"></script>
+<script>
+(function () {
+  const params = new URLSearchParams(window.location.search);
+  const host = params.get('host');
+  const shop = params.get('shop');
 
-    const AppBridge = window['app-bridge'];
-    const AppBridgeUtils = window['app-bridge-utils'];
-    const createApp = AppBridge.createApp;
-    const app = createApp({ apiKey: '${apiKey}', host });
+  // Ждём, пока App Bridge и utils реально загрузятся (CSP/интернет и т.п.)
+  function initWhenReady(tries = 0) {
+    const AB  = window['app-bridge'];
+    const ABU = window['app-bridge-utils'];
+    if (!AB || !ABU) {
+      if (tries < 50) return setTimeout(() => initWhenReady(tries + 1), 100);
+      const stats = document.getElementById('stats');
+      if (stats) stats.textContent = 'Не удалось загрузить Shopify App Bridge. Обновите страницу.';
+      return;
+    }
 
-    // Обёртка поверх fetch: добавляем session token в Authorization
+    const app = AB.createApp({ apiKey: '{{API_KEY}}', host }); // {{API_KEY}} я подставлю ниже
+
     async function authedFetch(url, options = {}) {
-      const token = await AppBridgeUtils.getSessionToken(app);
+      const token = await ABU.getSessionToken(app);
       const headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
       return fetch(url, Object.assign({}, options, { headers }));
     }
 
-    // ===== UI =====
+    // ---------- UI элементы ----------
     const listBtn  = document.getElementById('listBtn');
     const scanBtn  = document.getElementById('scanBtn');
     const tagBtn   = document.getElementById('tagBtn');
@@ -331,24 +339,25 @@ app.get('/', (_req, res) => {
 
     function customerRow(i, c){
       const addr = (c.addresses && c.addresses[0]) || {};
-      return \`<tr>
-        <td>\${i+1}</td>
-        <td>\${c.displayName || ''}</td>
-        <td>\${c.email || ''}</td>
-        <td>\${addr.city || ''}</td>
-        <td>\${addr.country || ''}</td>
-      </tr>\`;
+      return `<tr>
+        <td>${i+1}</td>
+        <td>${c.displayName || ''}</td>
+        <td>${c.email || ''}</td>
+        <td>${addr.city || ''}</td>
+        <td>${addr.country || ''}</td>
+      </tr>`;
     }
 
     function suspectRow(c){
-      return \`<tr>
-        <td><input type="checkbox" data-id="\${c.id}"></td>
-        <td>\${c.displayName || ''}</td>
-        <td>\${c.email || ''}</td>
-        <td>\${c.reasons.join(', ')}</td>
-      </tr>\`;
+      return `<tr>
+        <td><input type="checkbox" data-id="${c.id}"></td>
+        <td>${c.displayName || ''}</td>
+        <td>${c.email || ''}</td>
+        <td>${c.reasons.join(', ')}</td>
+      </tr>`;
     }
 
+    // ------- Кнопка: Показать клиентов -------
     listBtn.onclick = async () => {
       listBtn.disabled = true;
       stats.textContent = 'Загружаю клиентов…';
@@ -368,6 +377,7 @@ app.get('/', (_req, res) => {
       }
     };
 
+    // ------- Кнопка: Сканировать -------
     scanBtn.onclick = async () => {
       scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…';
       susBody.innerHTML = '';
@@ -378,12 +388,13 @@ app.get('/', (_req, res) => {
         const suspects = data.suspects || [];
         susTbl.style.display = suspects.length ? '' : 'none';
         susBody.innerHTML = suspects.map(suspectRow).join('');
-        stats.textContent = \`Проверено: \${data.totalChecked}. Найдено подозрительных: \${suspects.length}.\`;
+        stats.textContent = `Проверено: ${data.totalChecked}. Найдено подозрительных: ${suspects.length}.`;
         tagBtn.disabled = suspects.length === 0;
       } catch(e){ stats.textContent = 'Ошибка: ' + e; }
       finally { scanBtn.disabled = false; }
     };
 
+    // ------- Кнопка: Поставить тег -------
     tagBtn.onclick = async () => {
       const ids = Array.from(susBody.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.dataset.id);
       if (!ids.length) { alert('Отметь хотя бы одного клиента'); return; }
@@ -401,11 +412,17 @@ app.get('/', (_req, res) => {
       finally { tagBtn.disabled = false; }
     };
 
+    // чекбокс "выделить всё"
     checkAll?.addEventListener('change', () => {
       const on = checkAll.checked;
       susBody.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = on);
     });
-  </script>
+  }
+
+  document.addEventListener('DOMContentLoaded', () => initWhenReady());
+})();
+</script>
+
 </body>
 </html>`);
 });
