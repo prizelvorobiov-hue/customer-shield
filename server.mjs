@@ -263,7 +263,6 @@ app.get('/', (_req, res) => {
 
       <div id="stats" class="muted"></div>
 
-      <!-- Таблица: список клиентов -->
       <h3 style="margin:12px 0 4px">Список клиентов</h3>
       <table id="listTbl" style="margin-top:6px; display:none">
         <thead>
@@ -278,7 +277,6 @@ app.get('/', (_req, res) => {
         <tbody></tbody>
       </table>
 
-      <!-- Таблица: подозрительные -->
       <h3 style="margin:16px 0 4px">Подозрительные</h3>
       <table id="susTbl" style="margin-top:6px; display:none">
         <thead>
@@ -298,18 +296,38 @@ app.get('/', (_req, res) => {
     </div>
   </div>
 
+  <!-- App Bridge + Utils для session token -->
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+  <script src="https://unpkg.com/@shopify/app-bridge-utils"></script>
   <script>
-    const listBtn = document.getElementById('listBtn');
-    const scanBtn = document.getElementById('scanBtn');
-    const tagBtn  = document.getElementById('tagBtn');
-    const stats   = document.getElementById('stats');
+    const params = new URLSearchParams(window.location.search);
+    const host = params.get('host');
+    const shop = params.get('shop'); // может быть null — не критично
 
-    const listTbl = document.getElementById('listTbl');
-    const listTbody = listTbl.querySelector('tbody');
+    const AppBridge = window['app-bridge'];
+    const AppBridgeUtils = window['app-bridge-utils'];
+    const createApp = AppBridge.createApp;
+    const app = createApp({ apiKey: '${apiKey}', host });
 
-    const susTbl  = document.getElementById('susTbl');
-    const susTbody= susTbl.querySelector('tbody');
-    const checkAll= document.getElementById('checkAll');
+    // Обёртка поверх fetch: добавляем session token в Authorization
+    async function authedFetch(url, options = {}) {
+      const token = await AppBridgeUtils.getSessionToken(app);
+      const headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
+      return fetch(url, Object.assign({}, options, { headers }));
+    }
+
+    // ===== UI =====
+    const listBtn  = document.getElementById('listBtn');
+    const scanBtn  = document.getElementById('scanBtn');
+    const tagBtn   = document.getElementById('tagBtn');
+    const stats    = document.getElementById('stats');
+
+    const listTbl  = document.getElementById('listTbl');
+    const listBody = listTbl.querySelector('tbody');
+
+    const susTbl   = document.getElementById('susTbl');
+    const susBody  = susTbl.querySelector('tbody');
+    const checkAll = document.getElementById('checkAll');
 
     function customerRow(i, c){
       const addr = (c.addresses && c.addresses[0]) || {};
@@ -334,13 +352,14 @@ app.get('/', (_req, res) => {
     listBtn.onclick = async () => {
       listBtn.disabled = true;
       stats.textContent = 'Загружаю клиентов…';
-      listTbody.innerHTML = '';
+      listBody.innerHTML = '';
       try{
-        const r = await fetch('/api/customers/list?limit=50');
+        const r = await authedFetch('/api/customers/list?limit=50');
+        if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return; }
         const data = await r.json();
         const arr = data.customers || [];
         listTbl.style.display = arr.length ? '' : 'none';
-        listTbody.innerHTML = arr.map((c,i) => customerRow(i,c)).join('');
+        listBody.innerHTML = arr.map((c,i) => customerRow(i,c)).join('');
         stats.textContent = 'Клиентов: ' + (data.count ?? arr.length);
       } catch(e){
         stats.textContent = 'Ошибка: ' + e;
@@ -351,13 +370,14 @@ app.get('/', (_req, res) => {
 
     scanBtn.onclick = async () => {
       scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…';
-      susTbody.innerHTML = '';
+      susBody.innerHTML = '';
       try{
-        const r = await fetch('/api/customers/scan?max=50&batch=25');
+        const r = await authedFetch('/api/customers/scan?max=50&batch=25');
+        if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return; }
         const data = await r.json();
         const suspects = data.suspects || [];
         susTbl.style.display = suspects.length ? '' : 'none';
-        susTbody.innerHTML = suspects.map(suspectRow).join('');
+        susBody.innerHTML = suspects.map(suspectRow).join('');
         stats.textContent = \`Проверено: \${data.totalChecked}. Найдено подозрительных: \${suspects.length}.\`;
         tagBtn.disabled = suspects.length === 0;
       } catch(e){ stats.textContent = 'Ошибка: ' + e; }
@@ -365,11 +385,16 @@ app.get('/', (_req, res) => {
     };
 
     tagBtn.onclick = async () => {
-      const ids = Array.from(susTbody.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.dataset.id);
+      const ids = Array.from(susBody.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.dataset.id);
       if (!ids.length) { alert('Отметь хотя бы одного клиента'); return; }
       tagBtn.disabled = true;
       try{
-        const r = await fetch('/api/customers/tag', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ ids, tag: 'suspect_bot' }) });
+        const r = await authedFetch('/api/customers/tag', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids, tag: 'suspect_bot' })
+        });
+        if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return; }
         const data = await r.json();
         alert('Готово. Ошибок: ' + (data.results || []).filter(x => (x.errors||[]).length).length);
       } catch(e){ alert('Ошибка: ' + e); }
@@ -378,12 +403,13 @@ app.get('/', (_req, res) => {
 
     checkAll?.addEventListener('change', () => {
       const on = checkAll.checked;
-      susTbody.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = on);
+      susBody.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = on);
     });
   </script>
 </body>
 </html>`);
 });
+
 
 /* ===== Start ===== */
 app.listen(PORT, () => {
