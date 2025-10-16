@@ -1,13 +1,13 @@
 import express from 'express';
 import 'dotenv/config';
 
-// @shopify/shopify-app-express у тебя идёт как CJS → берём default
+// В твоём окружении @shopify/shopify-app-express идёт как CJS -> берём default
 import appExpress from '@shopify/shopify-app-express';
 const { shopifyApp, LATEST_API_VERSION } = appExpress;
 
 import { MemorySessionStorage } from '@shopify/shopify-app-session-storage-memory';
 
-// --- sanity-check env ---
+/* ===== sanity-check env ===== */
 const required = ['SHOPIFY_API_KEY','SHOPIFY_API_SECRET','SCOPES','HOST','SESSION_SECRET'];
 for (const k of required) {
   if (!process.env[k] || process.env[k].includes('replace_with')) {
@@ -17,7 +17,7 @@ for (const k of required) {
 
 const PORT = process.env.PORT || 3000;
 
-// --- Shopify app bootstrap ---
+/* ===== Shopify bootstrap ===== */
 const shopify = shopifyApp({
   api: {
     apiKey: process.env.SHOPIFY_API_KEY,
@@ -38,26 +38,25 @@ const app = express();
 app.use(shopify.cspHeaders());
 app.use(express.json());
 
-// --- Auth routes ---
+/* ===== Auth ===== */
 app.use('/api/auth', shopify.auth.begin());
 app.use('/api/auth/callback', shopify.auth.callback(), shopify.redirectToShopifyOrAppRoot());
 
-// --- Health ---
+/* ===== Health & GDPR ===== */
 app.get('/api/health', (_req, res) => res.status(200).json({ ok: true }));
-
-// --- GDPR (обязательные заглушки для App Store) ---
 app.post('/api/gdpr/customers/data_request', (_req, res) => res.sendStatus(200));
 app.post('/api/gdpr/customers/redact', (_req, res) => res.sendStatus(200));
 app.post('/api/gdpr/shop/redact', (_req, res) => res.sendStatus(200));
 
-// --- Пример защищённого эндпойнта ---
+/* ===== Protected example ===== */
 app.get('/api/me', shopify.validateAuthenticatedSession(), async (_req, res) => {
   const session = res.locals.shopify.session;
   res.json({ shop: session.shop, isOnline: session.isOnline });
 });
 
-// ====== НИЖЕ — логика сканирования и тегирования ======
+/* ===== Анти-бот логика ===== */
 const gql = String.raw;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const CUSTOMERS_QUERY = gql`
   query Customers($first: Int!, $after: String) {
@@ -87,7 +86,7 @@ const TAGS_ADD_MUTATION = gql`
   }
 `;
 
-// Простые эвристики «подозрительности»
+// Простые правила подозрительности
 function reasonsForSuspect(c) {
   const reasons = [];
   const fn = (c.firstName || '').trim();
@@ -105,44 +104,62 @@ function reasonsForSuspect(c) {
   return reasons;
 }
 
-// GET /api/customers/scan — собрать «подозрительных»
-app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (_req, res) => {
+/* --- GET /api/customers/scan --- 
+   Быстрый скан: по умолчанию проверяем до 50 клиентов батчами по 25.
+   Можно переопределить: /api/customers/scan?max=200&batch=100
+*/
+app.get('/api/customers/scan', shopify.validateAuthenticatedSession(), async (req, res) => {
   const session = res.locals.shopify.session;
   const client = new shopify.api.clients.Graphql({ session });
 
-  const batch = Number(_req.query.batch || 250);
-  const max = Math.min(Number(_req.query.max || 1000), 5000);
-  let after = undefined, collected = 0;
+  const batch = Number(req.query.batch ?? 25);
+  const max   = Math.min(Number(req.query.max ?? 50), 2000);
 
+  let after = undefined;
+  let checked = 0;
   const suspects = [];
 
-  while (collected < max) {
-    const data = await client.request(CUSTOMERS_QUERY, {
-      variables: { first: Math.min(batch, max - collected), after },
-    });
-    const edges = data.customers.edges || [];
-    for (const { cursor, node } of edges) {
-      const reasons = reasonsForSuspect(node);
-      if (reasons.length) {
-        suspects.push({
-          id: node.id,
-          displayName: node.displayName,
-          email: node.email,
-          firstName: node.firstName,
-          lastName: node.lastName,
-          reasons
-        });
-      }
-      after = cursor;
-      collected++;
-    }
-    if (!data.customers.pageInfo.hasNextPage) break;
-  }
+  try {
+    while (checked < max) {
+      const resp = await client.request(CUSTOMERS_QUERY, {
+        variables: { first: Math.min(batch, max - checked), after }
+      });
 
-  res.json({ totalChecked: collected, suspects });
+      const data = resp?.data ?? resp;
+      const customers = data?.customers;
+      const edges = customers?.edges || [];
+      if (!edges.length) break;
+
+      for (const { cursor, node } of edges) {
+        const reasons = reasonsForSuspect(node);
+        if (reasons.length) {
+          suspects.push({
+            id: node.id,
+            displayName: node.displayName,
+            email: node.email,
+            firstName: node.firstName,
+            lastName: node.lastName,
+            reasons
+          });
+        }
+        after = cursor;
+      }
+
+      checked += edges.length;
+      if (!customers?.pageInfo?.hasNextPage) break;
+      await sleep(150); // легкая пауза, чтобы не упираться в троттлинг
+    }
+
+    res.json({ totalChecked: checked, suspects });
+  } catch (e) {
+    console.error('SCAN ERROR:', e);
+    res.status(500).json({ error: String(e) });
+  }
 });
 
-// POST /api/customers/tag — массово поставить тег (по умолчанию suspect_bot)
+/* --- POST /api/customers/tag ---
+   Тело: { ids: [<gid://shopify/Customer/...>], tag: "suspect_bot" }
+*/
 app.post('/api/customers/tag', shopify.validateAuthenticatedSession(), async (req, res) => {
   const { ids = [], tag = 'suspect_bot' } = req.body || {};
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required' });
@@ -153,13 +170,14 @@ app.post('/api/customers/tag', shopify.validateAuthenticatedSession(), async (re
   const results = [];
   for (const id of ids) {
     const out = await client.request(TAGS_ADD_MUTATION, { variables: { id, tags: [tag] } });
-    results.push({ id, errors: out?.tagsAdd?.userErrors || [] });
+    const errs = out?.data?.tagsAdd?.userErrors || out?.tagsAdd?.userErrors || [];
+    results.push({ id, errors: errs });
+    await sleep(40);
   }
   res.json({ ok: true, results });
 });
-// ====== /логика сканирования ======
 
-// --- Встроенная страница админки с кнопками ---
+/* ===== Встроенная страница (UI) ===== */
 app.get('/', (_req, res) => {
   const apiKey = process.env.SHOPIFY_API_KEY || '';
   res.type('html').send(`<!DOCTYPE html>
@@ -171,7 +189,7 @@ app.get('/', (_req, res) => {
   <link rel="stylesheet" href="https://unpkg.com/@shopify/polaris@12.13.0/build/esm/styles.css" />
   <style>
     body{font-family:ui-sans-serif,system-ui;background:#f6f6f7}
-    .wrap{max-width:1000px;margin:24px auto;padding:16px}
+    .wrap{max-width:980px;margin:24px auto;padding:16px}
     .card{background:#fff;border:1px solid #e1e3e5;border-radius:12px;padding:16px}
     table{width:100%;border-collapse:collapse}
     th,td{padding:8px;border-bottom:1px solid #eee;font-size:14px}
@@ -206,7 +224,9 @@ app.get('/', (_req, res) => {
         <tbody></tbody>
       </table>
 
-      <p class="muted" style="margin-top:8px"><a href="/api/health" target="_blank">/api/health</a> · <a href="/api/me" target="_blank">/api/me</a></p>
+      <p class="muted" style="margin-top:8px">
+        <a href="/api/health" target="_blank">/api/health</a> · <a href="/api/me" target="_blank">/api/me</a>
+      </p>
     </div>
   </div>
 
@@ -232,7 +252,8 @@ app.get('/', (_req, res) => {
       scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…';
       tbody.innerHTML = '';
       try{
-        const r = await fetch('/api/customers/scan?max=1000&batch=250');
+        // быстрые значения по умолчанию (под тестовый магазин)
+        const r = await fetch('/api/customers/scan?max=50&batch=25');
         const data = await r.json();
         const suspects = data.suspects || [];
         stats.textContent = \`Проверено: \${data.totalChecked}. Найдено подозрительных: \${suspects.length}.\`;
@@ -268,7 +289,7 @@ app.get('/', (_req, res) => {
 </html>`);
 });
 
-// --- Start ---
+/* ===== Start ===== */
 app.listen(PORT, () => {
   console.log(`Customer Shield listening on port ${PORT}`);
 });
