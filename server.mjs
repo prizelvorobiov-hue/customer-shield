@@ -36,6 +36,21 @@ const shopify = shopifyApp({
 
 const app = express();
 app.use(shopify.cspHeaders());
+app.use((req, res, next) => {
+  const csp = [
+    "frame-ancestors https://admin.shopify.com https://*.myshopify.com",
+    "script-src 'self' 'unsafe-inline' https://cdn.shopify.com",
+    "style-src 'self' 'unsafe-inline' https://cdn.shopify.com",
+    "img-src 'self' data: https:",
+    "connect-src 'self' https://cdn.shopify.com https://admin.shopify.com https://*.myshopify.com https://*.shopifycloud.com https://*.shopifycs.com",
+    "font-src 'self' https://cdn.shopify.com data:",
+    "frame-src https://admin.shopify.com https://*.myshopify.com",
+    "object-src 'none'"
+  ].join('; ');
+  res.setHeader('Content-Security-Policy', csp);
+  next();
+});
+
 app.use(express.json());
 
 /* ===== Auth ===== */
