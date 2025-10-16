@@ -338,24 +338,24 @@ app.get('/', (_req, res) => {
     const checkAll = document.getElementById('checkAll');
 
     function customerRow(i, c){
-      const addr = (c.addresses && c.addresses[0]) || {};
-      return `<tr>
-        <td>${i+1}</td>
-        <td>${c.displayName || ''}</td>
-        <td>${c.email || ''}</td>
-        <td>${addr.city || ''}</td>
-        <td>${addr.country || ''}</td>
-      </tr>`;
+    const addr = (c.addresses && c.addresses[0]) || {};
+    return \`<tr>
+      <td>\${i+1}</td>
+      <td>\${c.displayName || ''}</td>
+      <td>\${c.email || ''}</td>
+      <td>\${addr.city || ''}</td>
+      <td>\${addr.country || ''}</td>
+    </tr>\`;
+    }
+    function suspectRow(c){
+    return \`<tr>
+      <td><input type="checkbox" data-id="\${c.id}"></td>
+      <td>\${c.displayName || ''}</td>
+      <td>\${c.email || ''}</td>
+      <td>\${c.reasons.join(', ')}</td>
+    </tr>\`;
     }
 
-    function suspectRow(c){
-      return `<tr>
-        <td><input type="checkbox" data-id="${c.id}"></td>
-        <td>${c.displayName || ''}</td>
-        <td>${c.email || ''}</td>
-        <td>${c.reasons.join(', ')}</td>
-      </tr>`;
-    }
 
     // ------- Кнопка: Показать клиентов -------
     listBtn.onclick = async () => {
