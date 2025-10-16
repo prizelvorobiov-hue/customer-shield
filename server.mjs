@@ -296,137 +296,150 @@ app.get('/', (_req, res) => {
     </div>
   </div>
 
-  <!-- App Bridge + Utils для session token -->
-<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
-<script src="https://cdn.shopify.com/shopifycloud/app-bridge-utils.js"></script>
-<script>
-(function () {
-  const params = new URLSearchParams(window.location.search);
-  const host = params.get('host');
-  const shop = params.get('shop');
+  <!-- Только cdn.shopify.com — чтобы не упереться в CSP -->
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge-utils.js"></script>
+  <script>
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var host = params.get('host');
+    var shop = params.get('shop');
 
-  // Ждём, пока App Bridge и utils реально загрузятся (CSP/интернет и т.п.)
-  function initWhenReady(tries = 0) {
-    const AB  = window['app-bridge'];
-    const ABU = window['app-bridge-utils'];
-    if (!AB || !ABU) {
-      if (tries < 50) return setTimeout(() => initWhenReady(tries + 1), 100);
-      const stats = document.getElementById('stats');
-      if (stats) stats.textContent = 'Не удалось загрузить Shopify App Bridge. Обновите страницу.';
-      return;
-    }
-
-    const app = AB.createApp({ apiKey: '{{API_KEY}}', host }); // {{API_KEY}} я подставлю ниже
-
-    async function authedFetch(url, options = {}) {
-      const token = await ABU.getSessionToken(app);
-      const headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
-      return fetch(url, Object.assign({}, options, { headers }));
-    }
-
-    // ---------- UI элементы ----------
-    const listBtn  = document.getElementById('listBtn');
-    const scanBtn  = document.getElementById('scanBtn');
-    const tagBtn   = document.getElementById('tagBtn');
-    const stats    = document.getElementById('stats');
-
-    const listTbl  = document.getElementById('listTbl');
-    const listBody = listTbl.querySelector('tbody');
-
-    const susTbl   = document.getElementById('susTbl');
-    const susBody  = susTbl.querySelector('tbody');
-    const checkAll = document.getElementById('checkAll');
-
-    function customerRow(i, c){
-    const addr = (c.addresses && c.addresses[0]) || {};
-    return \`<tr>
-      <td>\${i+1}</td>
-      <td>\${c.displayName || ''}</td>
-      <td>\${c.email || ''}</td>
-      <td>\${addr.city || ''}</td>
-      <td>\${addr.country || ''}</td>
-    </tr>\`;
-    }
-    function suspectRow(c){
-    return \`<tr>
-      <td><input type="checkbox" data-id="\${c.id}"></td>
-      <td>\${c.displayName || ''}</td>
-      <td>\${c.email || ''}</td>
-      <td>\${c.reasons.join(', ')}</td>
-    </tr>\`;
-    }
-
-
-    // ------- Кнопка: Показать клиентов -------
-    listBtn.onclick = async () => {
-      listBtn.disabled = true;
-      stats.textContent = 'Загружаю клиентов…';
-      listBody.innerHTML = '';
-      try{
-        const r = await authedFetch('/api/customers/list?limit=50');
-        if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return; }
-        const data = await r.json();
-        const arr = data.customers || [];
-        listTbl.style.display = arr.length ? '' : 'none';
-        listBody.innerHTML = arr.map((c,i) => customerRow(i,c)).join('');
-        stats.textContent = 'Клиентов: ' + (data.count ?? arr.length);
-      } catch(e){
-        stats.textContent = 'Ошибка: ' + e;
-      } finally {
-        listBtn.disabled = false;
+    function initWhenReady(tries) {
+      tries = tries || 0;
+      var AB  = window['app-bridge'];
+      var ABU = window['app-bridge-utils'];
+      if (!AB || !ABU) {
+        if (tries < 50) return setTimeout(function(){ initWhenReady(tries + 1); }, 100);
+        var stats = document.getElementById('stats');
+        if (stats) stats.textContent = 'Не удалось загрузить Shopify App Bridge. Обновите страницу.';
+        return;
       }
-    };
 
-    // ------- Кнопка: Сканировать -------
-    scanBtn.onclick = async () => {
-      scanBtn.disabled = true; tagBtn.disabled = true; stats.textContent = 'Сканирую…';
-      susBody.innerHTML = '';
-      try{
-        const r = await authedFetch('/api/customers/scan?max=50&batch=25');
-        if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return; }
-        const data = await r.json();
-        const suspects = data.suspects || [];
-        susTbl.style.display = suspects.length ? '' : 'none';
-        susBody.innerHTML = suspects.map(suspectRow).join('');
-        stats.textContent = `Проверено: ${data.totalChecked}. Найдено подозрительных: ${suspects.length}.`;
-        tagBtn.disabled = suspects.length === 0;
-      } catch(e){ stats.textContent = 'Ошибка: ' + e; }
-      finally { scanBtn.disabled = false; }
-    };
+      var app = AB.createApp({ apiKey: '${apiKey}', host: host });
 
-    // ------- Кнопка: Поставить тег -------
-    tagBtn.onclick = async () => {
-      const ids = Array.from(susBody.querySelectorAll('input[type="checkbox"]:checked')).map(i => i.dataset.id);
-      if (!ids.length) { alert('Отметь хотя бы одного клиента'); return; }
-      tagBtn.disabled = true;
-      try{
-        const r = await authedFetch('/api/customers/tag', {
+      function authedFetch(url, options) {
+        options = options || {};
+        return ABU.getSessionToken(app).then(function(token){
+          var headers = options.headers || {};
+          headers.Authorization = 'Bearer ' + token;
+          options.headers = headers;
+          return fetch(url, options);
+        });
+      }
+
+      // ---------- UI ----------
+      var listBtn  = document.getElementById('listBtn');
+      var scanBtn  = document.getElementById('scanBtn');
+      var tagBtn   = document.getElementById('tagBtn');
+      var statsEl  = document.getElementById('stats');
+
+      var listTbl  = document.getElementById('listTbl');
+      var listBody = listTbl.querySelector('tbody');
+
+      var susTbl   = document.getElementById('susTbl');
+      var susBody  = susTbl.querySelector('tbody');
+      var checkAll = document.getElementById('checkAll');
+
+      function customerRow(i, c){
+        var addr = (c.addresses && c.addresses[0]) || {};
+        return '<tr>'
+          + '<td>' + (i+1) + '</td>'
+          + '<td>' + (c.displayName || '') + '</td>'
+          + '<td>' + (c.email || '') + '</td>'
+          + '<td>' + (addr.city || '') + '</td>'
+          + '<td>' + (addr.country || '') + '</td>'
+          + '</tr>';
+      }
+
+      function suspectRow(c){
+        return '<tr>'
+          + '<td><input type="checkbox" data-id="' + c.id + '"></td>'
+          + '<td>' + (c.displayName || '') + '</td>'
+          + '<td>' + (c.email || '') + '</td>'
+          + '<td>' + c.reasons.join(', ') + '</td>'
+          + '</tr>';
+      }
+
+      listBtn.onclick = function () {
+        listBtn.disabled = true;
+        statsEl.textContent = 'Загружаю клиентов…';
+        listBody.innerHTML = '';
+        authedFetch('/api/customers/list?limit=50')
+          .then(function(r){
+            if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return Promise.reject('401'); }
+            return r.json();
+          })
+          .then(function(data){
+            var arr = data.customers || [];
+            listTbl.style.display = arr.length ? '' : 'none';
+            listBody.innerHTML = arr.map(function(c,i){ return customerRow(i,c); }).join('');
+            statsEl.textContent = 'Клиентов: ' + (data.count != null ? data.count : arr.length);
+          })
+          .catch(function(e){
+            if (e !== '401') statsEl.textContent = 'Ошибка: ' + e;
+          })
+          .finally(function(){ listBtn.disabled = false; });
+      };
+
+      scanBtn.onclick = function () {
+        scanBtn.disabled = true; tagBtn.disabled = true; statsEl.textContent = 'Сканирую…';
+        susBody.innerHTML = '';
+        authedFetch('/api/customers/scan?max=50&batch=25')
+          .then(function(r){
+            if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return Promise.reject('401'); }
+            return r.json();
+          })
+          .then(function(data){
+            var suspects = data.suspects || [];
+            susTbl.style.display = suspects.length ? '' : 'none';
+            susBody.innerHTML = suspects.map(function(c){ return suspectRow(c); }).join('');
+            statsEl.textContent = 'Проверено: ' + data.totalChecked + '. Найдено подозрительных: ' + suspects.length + '.';
+            tagBtn.disabled = suspects.length === 0;
+          })
+          .catch(function(e){
+            if (e !== '401') statsEl.textContent = 'Ошибка: ' + e;
+          })
+          .finally(function(){ scanBtn.disabled = false; });
+      };
+
+      tagBtn.onclick = function () {
+        var ids = Array.prototype.slice.call(susBody.querySelectorAll('input[type="checkbox"]:checked')).map(function(i){ return i.dataset.id; });
+        if (!ids.length) { alert('Отметь хотя бы одного клиента'); return; }
+        tagBtn.disabled = true;
+        authedFetch('/api/customers/tag', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids, tag: 'suspect_bot' })
+          body: JSON.stringify({ ids: ids, tag: 'suspect_bot' })
+        })
+        .then(function(r){
+          if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return Promise.reject('401'); }
+          return r.json();
+        })
+        .then(function(data){
+          var errs = (data.results || []).filter(function(x){ return (x.errors||[]).length; }).length;
+          alert('Готово. Ошибок: ' + errs);
+        })
+        .catch(function(e){
+          if (e !== '401') alert('Ошибка: ' + e);
+        })
+        .finally(function(){ tagBtn.disabled = false; });
+      };
+
+      if (checkAll) {
+        checkAll.addEventListener('change', function(){
+          var on = checkAll.checked;
+          Array.prototype.forEach.call(susBody.querySelectorAll('input[type="checkbox"]'), function(cb){ cb.checked = on; });
         });
-        if (r.status === 401) { window.location.href = '/api/auth' + (shop ? ('?shop=' + encodeURIComponent(shop)) : ''); return; }
-        const data = await r.json();
-        alert('Готово. Ошибок: ' + (data.results || []).filter(x => (x.errors||[]).length).length);
-      } catch(e){ alert('Ошибка: ' + e); }
-      finally { tagBtn.disabled = false; }
-    };
+      }
+    }
 
-    // чекбокс "выделить всё"
-    checkAll?.addEventListener('change', () => {
-      const on = checkAll.checked;
-      susBody.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = on);
-    });
-  }
-
-  document.addEventListener('DOMContentLoaded', () => initWhenReady());
-})();
-</script>
-
+    document.addEventListener('DOMContentLoaded', function(){ initWhenReady(); });
+  })();
+  </script>
 </body>
 </html>`);
 });
-
 
 /* ===== Start ===== */
 app.listen(PORT, () => {
